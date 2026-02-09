@@ -1,0 +1,52 @@
+
+#type: args
+
+train:
+  epochs: 200
+  batch_size: 16 
+  lr: 1.0e-3
+  itr_per_epoch: 1.0e+8
+  layers: 4
+
+
+meta:
+  tasks_per_batch: 10
+  support_frac: 0.5
+  inner_steps: 5  # Number of different batches to use in inner loop
+  inner_lr: 1.0e-4
+  outer_lr: 5.0e-4  # Outer loop learning rate for MUSTANG
+  num_outer_steps: 500
+
+diffusion:
+  layers: 4
+  channels: 64 
+  nheads: 8
+  diffusion_embedding_dim: 128
+  beta_start: 0.0001
+  beta_end: 0.5
+  num_steps: 50
+  schedule: "quad"
+  is_linear: False
+  proj_t: 16
+  is_cross_t: true
+  is_cross_s: true
+  # graph-aware conditional diffusion 超参数
+  graph_max_hops: 2        # 图最短路径最大跳数，用于 attention bias
+  graph_dropout: 0.1       # graph-aware conditional diffusion 中的 dropout 率
+  graph_ff_dim: 64         # graph-aware conditional diffusion feed-forward 层维度
+
+model:
+  is_unconditional: 0
+  timeemb: 128
+  featureemb: 16
+  target_strategy: "random"
+
+brits:
+  n_steps: 24
+  n_features: 7
+  patience: 10
+  epochs: 100
+  rnn_hidden_size: 512
+  epochs: 200
+  batch_size: 16 
+  num_workers: 4
