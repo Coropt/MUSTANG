@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from models.diff_models_gcn import DiffGraphAwareConditionalDiffusion
+from models.diff_models_graph import DiffGraphAwareConditionalDiffusion
 
 
 class GraphAwareConditionalDiffusionBase(nn.Module):

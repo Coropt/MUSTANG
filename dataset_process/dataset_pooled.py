@@ -76,25 +76,32 @@ def sample_mask(shape, p=0.0015, p_noise=0.05, max_seq=1, min_seq=1, rng=None):
     print("Number of True values in eval_mask:", np.sum(mask))
     return mask.astype('uint8')
 
-class NO3_Dataset(Dataset):
+
+class Pooled_Dataset(Dataset):
     def __init__(self, eval_length=16, seed=1, mode="train", val_len=0.1, test_len=0.2, test_missing='point',
                 training_missing='point', missing_ratio=0.1, pretrain_missing_rate=None):
         self.eval_length = eval_length
         self.training_missing = training_missing
         self.mode = mode
+        self.seed = seed
         self.use_index = []
         self.cut_length = []
 
 
-        selected_stations = [
+        selected_stations_8 = [
             '04178000', '04182000', '04183000', '04183500', '04185318', '04186500',
             '04188100', '04190000', '04191058', '04191444', '04191500', '04192500'
         ]
+        selected_stations = [str(int(s)) for s in selected_stations_8]
         
-        df = pd.read_csv('./original_data/Nitrate/NO3_pooled.csv', index_col=0)
+        df = pd.read_csv('./original_data/Discharge/SSC_pooled.csv', index_col=0)
         df.index = pd.to_datetime(df.index)
+        
+
         df.columns = df.columns.astype(str)
-        df = df[selected_stations]
+        available_stations = [s for s in selected_stations if s in df.columns]
+        print(f"Selected stations: {available_stations} (total {len(available_stations)})")
+        df = df[available_stations]
         
         datetime_idx = sorted(df.index)
         date_range = pd.date_range(datetime_idx[0], datetime_idx[-1], freq='1D')
@@ -106,19 +113,18 @@ class NO3_Dataset(Dataset):
         #### log transformation #####
         df = df.loc[start_date:end_date, :]
 
+        data_shape = df.values.shape
 
-        original_ob_mask = ~np.isnan(df.values)
+        ob_mask = ~np.isnan(df.values)
+        original_ob_mask = ob_mask.copy()
+        pretrain_mask_enabled = pretrain_missing_rate is not None and pretrain_missing_rate > 0
 
         total_entries = np.prod(df.values.shape)
         original_missing = np.isnan(df.values).sum()
         original_missing_rate = original_missing / total_entries
 
-        ob_mask = original_ob_mask.copy()
-        pretrain_mask_enabled = pretrain_missing_rate is not None and pretrain_missing_rate > 0
-
         df.fillna(method='ffill', axis=0, inplace=True)
 
-        # print(df.head())
         
 
         # SEED = 56789
@@ -127,8 +133,6 @@ class NO3_Dataset(Dataset):
         if pretrain_missing_rate is not None:
             mask_rng = np.random.default_rng(SEED)
             ob_mask = apply_pretrained_mask(ob_mask, pretrain_missing_rate, rng=mask_rng)
-        data_shape = df.values.shape
-        num_features = data_shape[1]
         if pretrain_mask_enabled:
             if mode == 'valid':
                 if test_missing == 'block':
@@ -149,13 +153,14 @@ class NO3_Dataset(Dataset):
 
         gt_mask = (1-(eval_mask | (1-ob_mask))).astype('uint8')
 
+        num_features = data_shape[1]
         self.train_mean = np.zeros(num_features)
         self.train_std = np.zeros(num_features)
         for k in range(num_features):
             tmp_data = df.iloc[:, k][ob_mask[:, k] == 1]
             self.train_mean[k] = tmp_data.mean()
             self.train_std[k] = tmp_data.std()
-        path = "./original_data/Nitrate/no3_meanstd.pk"
+        path = "./original_data/Discharge/pooled_meanstd.pk"
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
         with open(path, "wb") as f:
             pickle.dump([self.train_mean, self.train_std], f)
@@ -166,9 +171,7 @@ class NO3_Dataset(Dataset):
              (df.fillna(0).values - self.train_mean) / self.train_std
         )
         c_data = full_data * ob_mask
-
         eval_observed_mask = original_ob_mask if pretrain_mask_enabled else ob_mask
-        
         if mode == 'train':
             self.observed_mask = ob_mask[:val_start]
             self.gt_mask = gt_mask[:val_start]
@@ -184,20 +187,20 @@ class NO3_Dataset(Dataset):
             self.gt_mask = gt_mask[test_start:]
             self.observed_data = c_data[test_start:]
             self.target_data = full_data[test_start:]
-        current_length = len(self.observed_mask) - self.eval_length + 1
+        current_length = len(self.observed_mask) - eval_length + 1
 
         if mode == "test":
 
 
-            n_sample = len(self.observed_data) // self.eval_length
+            n_sample = len(self.observed_data) // eval_length
             c_index = np.arange(
-                0, 0 + self.eval_length * n_sample, self.eval_length
+                0, 0 + eval_length * n_sample, eval_length
             )
             self.use_index += c_index.tolist()
             self.cut_length += [0] * len(c_index)
-            if len(self.observed_data) % self.eval_length != 0:
+            if len(self.observed_data) % eval_length != 0:
                 self.use_index += [current_length - 1]
-                self.cut_length += [self.eval_length - len(self.observed_data) % self.eval_length]
+                self.cut_length += [eval_length - len(self.observed_data) % eval_length]
         elif mode != "test":
             self.use_index = np.arange(current_length)
             self.cut_length = [0] * len(self.use_index)
@@ -209,18 +212,17 @@ class NO3_Dataset(Dataset):
         ob_mask = self.observed_mask[index: index + self.eval_length]
         ob_mask_t = torch.tensor(ob_mask).float()
         gt_mask = self.gt_mask[index: index + self.eval_length]
-        
         if self.mode == 'test':
 
             cond_mask = torch.tensor(gt_mask).to(torch.float32)
         elif self.mode == 'valid':
+
             cond_mask = torch.tensor(gt_mask).to(torch.float32)
         else:
             if self.training_missing != 'point':
                 cond_mask = get_block_mask(ob_mask_t, eval_length=self.eval_length)
             else:
                 cond_mask = get_randmask(ob_mask_t)
-        
         s = {
             "observed_data": ob_data,
             "target_data": target_data,
@@ -228,7 +230,7 @@ class NO3_Dataset(Dataset):
             "gt_mask": gt_mask,
             "timepoints": np.arange(self.eval_length),
             "cut_length": self.cut_length[org_index],
-            "cond_mask": cond_mask,
+            "cond_mask": cond_mask
         }
 
         return s
@@ -237,21 +239,21 @@ class NO3_Dataset(Dataset):
         return len(self.use_index)
 
 
-def get_dataloader_NO3(sequence_length, batch_size, device, seed=45678, val_len=0.1, test_len=0.2, num_workers=4, 
+def get_dataloader_pooled(sequence_length, batch_size, device, seed=1, val_len=0.1, test_len=0.2, num_workers=4, 
                    test_missing='block', training_missing='block', missing_ratio=0.1, pretrain_missing_rate=None):
-    dataset = NO3_Dataset(eval_length=sequence_length, seed=seed, mode="train", val_len=val_len, test_len=test_len,
+    dataset = Pooled_Dataset(eval_length=sequence_length, seed=seed, mode="train", val_len=val_len, test_len=test_len,
                              test_missing=test_missing, training_missing=training_missing, missing_ratio=missing_ratio,
                              pretrain_missing_rate=pretrain_missing_rate)
     train_loader = DataLoader(
         dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True
     )
-    dataset_test = NO3_Dataset(eval_length=sequence_length, seed=seed, mode="test", val_len=val_len, test_len=test_len,
+    dataset_test = Pooled_Dataset(eval_length=sequence_length, seed=seed, mode="test", val_len=val_len, test_len=test_len,
                              test_missing=test_missing, training_missing=training_missing, missing_ratio=missing_ratio,
                              pretrain_missing_rate=pretrain_missing_rate)
     test_loader = DataLoader(
         dataset_test, batch_size=batch_size, num_workers=num_workers, shuffle=False
     )
-    dataset_valid = NO3_Dataset(eval_length=sequence_length, seed=seed, mode="valid", val_len=val_len, test_len=test_len,
+    dataset_valid = Pooled_Dataset(eval_length=sequence_length, seed=seed, mode="valid", val_len=val_len, test_len=test_len,
                              test_missing=test_missing, training_missing=training_missing, missing_ratio=missing_ratio,
                              pretrain_missing_rate=pretrain_missing_rate)
     valid_loader = DataLoader(

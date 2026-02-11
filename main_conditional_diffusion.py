@@ -1,12 +1,12 @@
 import argparse
 import torch
-print(torch.__version__)                # 查看pytorch安装的版本号
-cuda_available = torch.cuda.is_available()  # 查看cuda是否可用。True为可用，即是gpu版本pytorch
+print(torch.__version__)
+cuda_available = torch.cuda.is_available()
 print(cuda_available)
 if cuda_available:
-    print(torch.cuda.get_device_name(0))    # 返回GPU型号
-    print(torch.cuda.device_count())        # 返回可以用的cuda（GPU）数量，0代表一个
-    print(torch.version.cuda)               # 查看cuda的版本
+    print(torch.cuda.get_device_name(0))
+    print(torch.cuda.device_count())
+    print(torch.version.cuda)
 else:
     print("CUDA not available, using CPU.")
 import datetime
@@ -96,10 +96,9 @@ parser.add_argument("--pretrained_model", type=str, default=None,
                     help="Path to pretrained model for fine-tuning (e.g., from MUSTANG)")
 parser.add_argument("--epochs", type=int, default=None,
                     help="Override number of training epochs from config")
-parser.add_argument("--use_gcn", action="store_true",
+parser.add_argument("--use_graph", action="store_true",
                     help="Use graph-aware conditional diffusion spatial layer.")
-parser.add_argument("--use_graphdiffusion", action="store_true",
-                    help="Use CAPRI-style graph-aware conditional diffusion spatial layer.")
+parser.add_argument("--use_gcn", dest="use_graph", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--adj_path", type=str, default="",
                     help="Path to adjacency/flow-direction CSV for GCN.")
 parser.add_argument("--freeze_temporal_only", action="store_true",
@@ -131,15 +130,9 @@ if args.pretrain_missingrate is not None and args.pretrain_missingrate > 0:
         f"[INFO] pretrain_missingrate={args.pretrain_missingrate} is set: "
         "eval_mask/testmissingratio is ignored; evaluation uses pretrained-masked points."
     )
-if args.use_gcn and args.use_graphdiffusion:
-    raise ValueError("Choose only one of --use_gcn or --use_graphdiffusion.")
-graph_model = None
-if args.use_graphdiffusion:
-    graph_model = "graphdiffusion"
-elif args.use_gcn:
-    graph_model = "graphormer"
-if graph_model:
-    config["diffusion"]["graph_model"] = graph_model
+use_graph = args.use_graph
+if use_graph:
+    config["diffusion"]["graph_model"] = "graph_aware"
 
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") 
 foldername = (
@@ -175,7 +168,7 @@ if args.use_wandb:
             "lr": config["train"]["lr"],
             "epochs": config["train"]["epochs"],
             "pretrained_model": args.pretrained_model,
-            "model_variant": "graph-aware conditional diffusion" if graph_model else "conditional diffusion",
+            "model_variant": "graph-aware conditional diffusion" if use_graph else "conditional diffusion",
             "adj_path": args.adj_path,
             "freeze_temporal_only": args.freeze_temporal_only,
             "gcn_lr_scale": args.gcn_lr_scale,
@@ -217,14 +210,14 @@ train_loader, valid_loader, test_loader, scaler, mean_scaler = get_dataloader(
 target_dim = len(COMMON_STATIONS_12)
 
 adj_path = None
-if graph_model:
+if use_graph:
     adj_path = args.adj_path or os.path.join(
         "original_data", "Discharge", "SSC_sites_flow_direction.csv"
     )
     adj = _load_flow_direction(adj_path, COMMON_STATIONS_12)
     print(f"Using graph-aware conditional diffusion adjacency from: {adj_path}")
 
-if graph_model:
+if use_graph:
     model = GraphAwareConditionalDiffusionImputation(
         config, args.device, target_dim=target_dim, adj=adj
     ).to(args.device)
@@ -257,7 +250,7 @@ if args.freeze_temporal_only:
         print(f"  - {name}")
 
 gcn_lr_scale = None
-if graph_model and args.gcn_lr_scale != 1.0:
+if use_graph and args.gcn_lr_scale != 1.0:
     gcn_lr_scale = args.gcn_lr_scale
 
 start_time = time.time()

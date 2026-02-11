@@ -182,35 +182,33 @@ def calc_quantile_CRPS_sum(target, forecast, eval_points, mean_scaler, scaler):
 
 
 def calculate_station_metrics(target, generated_samples, eval_points, scaler, mean_scaler):
-    """
-    计算逐station的指标 (RMSE, MAE, CRPS)
-    """
+    """Compute per-station RMSE, MAE, and CRPS."""
     B, L, K = target.shape
     station_metrics = []
     
-    # 计算每个station的样本中位数
+
     samples_median = generated_samples.median(dim=1).values  # (B, L, K)
     
-    for k in range(K):  # 遍历每个station
-        # 获取第k个station的数据
+    for k in range(K):
+
         target_k = target[:, :, k]  # (B, L)
         samples_median_k = samples_median[:, :, k]  # (B, L)
         eval_points_k = eval_points[:, :, k]  # (B, L)
         generated_samples_k = generated_samples[:, :, :, k]  # (B, nsample, L)
         
-        # 确保维度匹配
+
         if target_k.shape != samples_median_k.shape or target_k.shape != eval_points_k.shape:
             min_dim1 = min(target_k.shape[1], samples_median_k.shape[1], eval_points_k.shape[1])
             target_k = target_k[:, :min_dim1]
             samples_median_k = samples_median_k[:, :min_dim1]
             eval_points_k = eval_points_k[:, :min_dim1]
         
-        # 计算RMSE
+
         diff = samples_median_k - target_k
         masked_diff = diff * eval_points_k
         squared_diff = masked_diff ** 2
         
-        # 获取第k个station的scaler值
+
         if isinstance(scaler, torch.Tensor) and scaler.shape[0] == K:
             scaler_k = scaler[k].item()
         else:
@@ -219,10 +217,10 @@ def calculate_station_metrics(target, generated_samples, eval_points, scaler, me
         mse_k = squared_diff * (scaler_k ** 2)
         rmse_k = torch.sqrt(mse_k.sum() / eval_points_k.sum()) if eval_points_k.sum() > 0 else torch.tensor(0.0)
         
-        # 计算MAE
+
         mae_k = (torch.abs((samples_median_k - target_k) * eval_points_k) * scaler_k).sum() / eval_points_k.sum() if eval_points_k.sum() > 0 else torch.tensor(0.0)
         
-        # 计算CRPS
+
         if isinstance(mean_scaler, torch.Tensor) and mean_scaler.shape[0] == K:
             mean_scaler_k = mean_scaler[k].item()
         else:
@@ -239,9 +237,7 @@ def calculate_station_metrics(target, generated_samples, eval_points, scaler, me
 
 
 def calc_quantile_CRPS_single_station(target, forecast, eval_points, mean_scaler, scaler):
-    """
-    计算单个station的CRPS
-    """
+    """Compute CRPS for one station."""
     quantiles = np.arange(0.05, 1.0, 0.05)
     denom = calc_denominator(target, eval_points)
     CRPS = 0
@@ -255,16 +251,14 @@ def calc_quantile_CRPS_single_station(target, forecast, eval_points, mean_scaler
 
 
 def get_station_ids(num_stations):
-    """
-    根据station数量返回对应的station ID列表
-    """
+    """Return station IDs for a known station count."""
     if num_stations == 20:
-        # Discharge/Pooled数据集的20个stations
+
         return ['4178000', '4182000', '4183000', '4183500', '4184500', '4185000', '4185318', '4185440', 
                 '4186500', '4188100', '4188496', '4189000', '4190000', '4191058', '4191444', '4191500', 
                 '4192500', '4192574', '4192599', '4193500']
     elif num_stations == 12:
-        # NH4/NO3/SRP/TP数据集的12个stations (原始版本)
+
         return ['04178000', '04183000', '04183500', '04185318', '04186500', 
                 '04188100', '04190000', '04191058', '04191444', '04191500', '04192500', '04193500']
     elif num_stations == 14:
@@ -273,92 +267,80 @@ def get_station_ids(num_stations):
                 '04188100', '04188496', '04190000', '04191058', '04191444', '04191500', 
                 '04192500', '04193500']
     else:
-        # 默认返回通用ID
+
         return [f"Station_{i+1}" for i in range(num_stations)]
 
 
 def save_results_to_csv(all_target, all_generated_samples, all_evalpoint, all_observed_point, 
                         all_observed_time, scaler, mean_scaler, foldername, nsample):
-    """
-    保存预测结果到CSV文件
-    参数:
-        all_target: (B, L, K) 目标值（观测值）
-        all_generated_samples: (B, nsample, L, K) 生成的样本
-        all_evalpoint: (B, L, K) 评估点 mask（用于预测的点）
-        all_observed_point: (B, L, K) 观测点 mask
-        all_observed_time: (B, L) 时间索引
-        scaler: 标准差
-        mean_scaler: 均值
-        foldername: 保存文件夹
-        nsample: 样本数量
-    """
-    # 转换为numpy
+    """Save per-station and merged prediction CSV files."""
+
     target_np = all_target.cpu().numpy()  # (B, L, K)
     samples_np = all_generated_samples.cpu().numpy()  # (B, nsample, L, K)
     evalpoint_np = all_evalpoint.cpu().numpy()  # (B, L, K)
     observed_point_np = all_observed_point.cpu().numpy()  # (B, L, K)
     time_np = all_observed_time.cpu().numpy()  # (B, L)
     
-    # 计算中位数作为预测值
+
     predictions_np = np.median(samples_np, axis=1)  # (B, L, K)
     
-    # 反标准化
+
     if isinstance(scaler, torch.Tensor):
         scaler = scaler.cpu().numpy()
     if isinstance(mean_scaler, torch.Tensor):
         mean_scaler = mean_scaler.cpu().numpy()
     
-    # 反标准化: value = (normalized_value * std) + mean
+
     target_original = target_np * scaler + mean_scaler  # (B, L, K)
     predictions_original = predictions_np * scaler + mean_scaler  # (B, L, K)
     
     B, L, K = target_np.shape
     
-    # 获取station IDs
+
     station_ids = get_station_ids(K)
     
-    # 为每个station创建一个CSV文件
+
     for k in range(K):
         station_id = station_ids[k] if k < len(station_ids) else f"Station_{k+1}"
         
-        # 准备数据列表
+
         data_rows = []
         
         for b in range(B):
             for l in range(L):
-                # 时间步索引（可以根据实际需求修改为真实日期）
+
                 time_idx = int(time_np[b, l])
                 
-                # 观测值
+
                 observed_val = target_original[b, l, k]
                 
-                # 预测值
+
                 predicted_val = predictions_original[b, l, k]
                 
-                # evaluation_mask: 1 表示该点被评估（预测），0 表示未评估
-                # evalpoint 表示需要预测的点，observed_point 表示观测到的点
+
+
                 mask_val = int(evalpoint_np[b, l, k])
                 
-                # 添加到数据行
+
                 data_rows.append({
-                    'timestep': b * L + l,  # 全局时间步
-                    'sequence_id': b,  # 序列ID
-                    'time_in_sequence': l,  # 序列内时间步
+                    'timestep': b * L + l,
+                    'sequence_id': b,
+                    'time_in_sequence': l,
                     'imputed_value': predicted_val,
                     'ground_truth_value': observed_val,
                     'evaluation_mask': mask_val,
                     'is_observed_point': int(observed_point_np[b, l, k])
                 })
         
-        # 创建DataFrame
+
         df = pd.DataFrame(data_rows)
         
-        # 保存为CSV
+
         csv_filename = f"{foldername}/predictions_station_{station_id}_nsample{nsample}.csv"
         df.to_csv(csv_filename, index=False)
         print(f"Saved predictions for station {station_id} to {csv_filename}")
     
-    # 同时保存一个合并所有station的文件
+
     all_data_rows = []
     for k in range(K):
         station_id = station_ids[k] if k < len(station_ids) else f"Station_{k+1}"
@@ -436,9 +418,9 @@ def evaluate_conditional_diffusion(
                 all_observed_time.append(observed_time)
                 all_generated_samples.append(samples)
 
-                # 修复scaler使用 - 需要正确广播
+
                 if isinstance(scaler, torch.Tensor):
-                    # scaler是(K,)形状，需要广播到(B, L, K)
+
                     scaler_expanded = scaler.unsqueeze(0).unsqueeze(0)  # (1, 1, K)
                     scaler_expanded = scaler_expanded.expand(c_target.shape)  # (B, L, K)
                 else:
@@ -493,16 +475,16 @@ def evaluate_conditional_diffusion(
                 all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
             )
 
-            # 计算逐station的指标
-            print("\n=== 逐Station指标 ===")
+
+            print("\n=== Per-station metrics ===")
             station_metrics = calculate_station_metrics(
                 all_target, all_generated_samples, all_evalpoint, scaler, mean_scaler
             )
             
-            # 获取station ID信息（根据数据集类型）
-            station_ids = get_station_ids(all_target.shape[-1])  # K是station数量
+
+            station_ids = get_station_ids(all_target.shape[-1])
             
-            # 打印逐station结果
+
             for i, (rmse, mae, crps) in enumerate(station_metrics):
                 station_id = station_ids[i] if i < len(station_ids) else f"Station_{i+1}"
                 print(f"{station_id}: RMSE={rmse:.4f}, MAE={mae:.4f}, CRPS={crps:.4f}")
@@ -518,7 +500,7 @@ def evaluate_conditional_diffusion(
                     ],
                     f,
                 )
-                print("\n=== Overall指标 ===")
+                print("\n=== Overall metrics ===")
                 print("RMSE:", np.sqrt(mse_total / evalpoints_total))
                 print("MAE:", mae_total / evalpoints_total)
                 print("CRPS:", CRPS)
@@ -538,11 +520,11 @@ def evaluate_conditional_diffusion(
                         metrics[f"eval/station/{station_id}_mae"] = mae
                         metrics[f"eval/station/{station_id}_crps"] = crps
                 wandb_run.log(metrics)
-                # 更新 summary 以便聚合脚本可以读取
+
                 wandb_run.summary.update(metrics)
             
-            # 保存CSV文件
-            print("\n=== 保存CSV文件 ===")
+
+            print("\n=== Saving CSV files ===")
             save_results_to_csv(
                 all_target, 
                 all_generated_samples, 

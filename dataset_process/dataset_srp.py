@@ -49,31 +49,31 @@ def get_block_mask(observed_mask, eval_length=16):
     return cond_mask
 
 def sample_mask(shape, p=0.0015, p_noise=0.05, max_seq=1, min_seq=1, rng=None):
-    # shape：输出掩码数组的形状。
-    # p：初始选择某个位置的概率。
-    # p_noise：添加随机噪声的概率。
-    # max_seq 和 min_seq：故障序列的最大和最小长度。
-    # rng：随机数生成器。如果没有提供，则使用默认的 NumPy 随机数生成器。
+
+
+
+
+
     if rng is None:
         rand = np.random.random
         randint = np.random.randint
     else:
         rand = rng.random
         randint = rng.integers
-    mask = rand(shape) < p # 概率 p 初始化一个布尔掩码数组 mask，形状为 shape。mask 中的值根据概率 p 进行随机选择，True 表示被选中。
+    mask = rand(shape) < p
     for col in range(mask.shape[1]):
-        idxs = np.flatnonzero(mask[:, col]) # 找出当前列中所有值为 True 的索引 idxs。
-        if not len(idxs): # # 如果没有值为True的索引，跳过该列
+        idxs = np.flatnonzero(mask[:, col])
+        if not len(idxs):
             continue
         fault_len = min_seq # 5
         if max_seq > min_seq: # 15
             fault_len = fault_len + int(randint(max_seq - min_seq)) # 5+x
-        idxs_ext = np.concatenate([np.arange(i, i + fault_len) for i in idxs]) # 扩展索引以包括故障序列中的所有索引
-        idxs = np.unique(idxs_ext) # 去重并确保索引不超过数组边界
+        idxs_ext = np.concatenate([np.arange(i, i + fault_len) for i in idxs])
+        idxs = np.unique(idxs_ext)
         idxs = np.clip(idxs, 0, shape[0] - 1)
-        mask[idxs, col] = True # 将这些索引位置的值设为True
-    mask = mask | (rand(mask.shape) < p_noise) # 增加随机噪声，根据概率p_noise添加更多True值
-    print("eval_mask True值的个数:", np.sum(mask))
+        mask[idxs, col] = True
+    mask = mask | (rand(mask.shape) < p_noise)
+    print("Number of True values in eval_mask:", np.sum(mask))
     return mask.astype('uint8')
 
 class SRP_Dataset(Dataset):
@@ -85,14 +85,14 @@ class SRP_Dataset(Dataset):
         self.use_index = []
         self.cut_length = []
 
-        # 筛选12个站点
+
         selected_stations = [
             '04178000', '04182000', '04183000', '04183500', '04185318', '04186500',
             '04188100', '04190000', '04191058', '04191444', '04191500', '04192500'
         ]
         
         df = pd.read_csv('./original_data/Phosphorus/SRP_pooled.csv', index_col=0)
-        df.index = pd.to_datetime(df.index) # 将索引转换为日期时间格式
+        df.index = pd.to_datetime(df.index)
         df.columns = df.columns.astype(str)
         df = df[selected_stations]
         
@@ -101,10 +101,10 @@ class SRP_Dataset(Dataset):
         df = df.reindex(index=date_range) 
 
         start_date = '2015/4/15'
-        end_date = '2022/9/30'  # 统一时间范围
+        end_date = '2022/9/30'
         
         #### log transformation #####
-        df = df.loc[start_date:end_date, :] # 特定时间范围的数据
+        df = df.loc[start_date:end_date, :]
 
         original_ob_mask = ~np.isnan(df.values)
 
@@ -116,7 +116,7 @@ class SRP_Dataset(Dataset):
         pretrain_mask_enabled = pretrain_missing_rate is not None and pretrain_missing_rate > 0
 
         df.fillna(method='ffill', axis=0, inplace=True)
-        # print("重新索引并填充缺失值后的数据:")
+
         # print(df.head())
         
 
@@ -186,8 +186,8 @@ class SRP_Dataset(Dataset):
         current_length = len(self.observed_mask) - self.eval_length + 1
 
         if mode == "test":
-            # 如果数据长度不是 eval_length 的倍数，最后一段是不完整的 → 补一个“伪样本”，但会记录其中有多少位置是填充的
-            # 这个“填充的长度”就存到了 cut_length 中
+
+
             n_sample = len(self.observed_data) // self.eval_length
             c_index = np.arange(
                 0, 0 + self.eval_length * n_sample, self.eval_length
@@ -210,7 +210,7 @@ class SRP_Dataset(Dataset):
         gt_mask = self.gt_mask[index: index + self.eval_length]
         
         if self.mode == 'test':
-            # test 时使用 gt_mask，模型看不到评估点（与 CD2-TSI 保持一致）
+
             cond_mask = torch.tensor(gt_mask).to(torch.float32)
         elif self.mode == 'valid':
             cond_mask = torch.tensor(gt_mask).to(torch.float32)

@@ -18,17 +18,9 @@ from dataset_process.meta_data_processor import build_nonoverlap_loaders
 from models.conditional_diffusion import ConditionalDiffusionImputation
 from models.graph_aware_conditional_diffusion import GraphAwareConditionalDiffusionImputation
 from util.meta_learning import (
-    MetaTaskLoader, 
     MultiDatasetMetaTaskLoader,
-    MultiDatasetMetaTaskLoaderV2,
-    MultiDatasetMetaTaskLoaderV3,
-    RoundRobinMetaTaskLoader,
-    meta_train, 
-    meta_train_v2,
-    meta_train_v3,
+    meta_train,
     meta_validate,
-    meta_validate_v2,
-    meta_validate_v3,
 )
 
 COMMON_STATIONS_12 = [
@@ -177,7 +169,6 @@ def _load_meta_config(config: Dict) -> Dict:
         "tasks_per_batch": 4,
         "support_frac": 0.5,
         "inner_steps": 3,
-        "inner_epochs": 1,  # Number of times to iterate through support batches
         "inner_lr": 1.0e-3,
         "num_outer_steps": 500,
         "grad_clip": 1.0,
@@ -227,8 +218,6 @@ def main():
     parser.add_argument("--test_len", type=float, default=0.2,
                         help="Fraction of data reserved for test split in MUSTANG.")
     parser.add_argument("--seed", type=int, default=1, help="Random seed.")
-    parser.add_argument("--round_robin", action="store_true",
-                        help="Use round-robin task sampling (one batch from each dataset per epoch) instead of random sampling.")
     parser.add_argument(
         "--meta_batch_sampler",
         type=str,
@@ -236,18 +225,15 @@ def main():
         default="nonoverlap",
         help="Batch sampling strategy for MUSTANG loaders.",
     )
-    parser.add_argument("--v3", action="store_true",
-                        help="Use V3 MUSTANG: mask-based support/query split (preserves shape).")
     parser.add_argument("--use_wandb", type=_str2bool, default=False)
     parser.add_argument("--wandb_project", type=str, default="mustang-conditional-diffusion")
     parser.add_argument("--wandb_name", type=str, default=None)
     parser.add_argument("--wandb_group", type=str, default=None)
     parser.add_argument("--wandb_tags", type=str, default="")
     parser.add_argument("--wandb_mode", type=str, default=None)
-    parser.add_argument("--use_gcn", action="store_true",
+    parser.add_argument("--use_graph", action="store_true",
                         help="Use graph-aware conditional diffusion spatial layer for MUSTANG.")
-    parser.add_argument("--use_graphdiffusion", action="store_true",
-                        help="Use CAPRI-style graph-aware conditional diffusion spatial layer for MUSTANG.")
+    parser.add_argument("--use_gcn", dest="use_graph", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--adj_path", type=str, default="",
                         help="Path to adjacency/flow-direction CSV (defaults to Discharge SSC_sites_flow_direction.csv).")
     parser.add_argument("--num_outer_steps", type=int, default=None,
@@ -275,7 +261,7 @@ def main():
         print(f"Held-out dataset: {args.held_out}")
     print(f"Device: {args.device}")
     print(f"Sequence length: {args.sequence_length}")
-    print(f"Task sampling: {'Round-Robin' if args.round_robin else 'Random'}")
+    print("Task sampling: Random")
 
     device = torch.device(args.device)
     
@@ -288,15 +274,9 @@ def main():
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    if args.use_gcn and args.use_graphdiffusion:
-        raise ValueError("Choose only one of --use_gcn or --use_graphdiffusion.")
-    graph_model = None
-    if args.use_graphdiffusion:
-        graph_model = "graphdiffusion"
-    elif args.use_gcn:
-        graph_model = "graphormer"
-    if graph_model:
-        config["diffusion"]["graph_model"] = graph_model
+    use_graph = args.use_graph
+    if use_graph:
+        config["diffusion"]["graph_model"] = "graph_aware"
 
     meta_config = _load_meta_config(config)
     if args.num_outer_steps is not None:
@@ -310,14 +290,14 @@ def main():
     # Build model
     adj = None
     adj_path = None
-    if graph_model:
+    if use_graph:
         adj_path = args.adj_path or os.path.join(
             "original_data", "Discharge", "SSC_sites_flow_direction.csv"
         )
         adj = _load_flow_direction(adj_path, COMMON_STATIONS_12)
         print(f"Using graph-aware conditional diffusion adjacency from: {adj_path}")
 
-    if graph_model:
+    if use_graph:
         model = GraphAwareConditionalDiffusionImputation(
             config, args.device, target_dim=target_dim, adj=adj
         ).to(device)
@@ -361,62 +341,19 @@ def main():
             valid_loaders[dataset_name] = valid_loader
         
         print(f"\nLoaded {len(train_datasets)} datasets for multi-dataset MUSTANG")
-        
-        # Determine which version to use
-        use_v2 = False
-        use_v3 = args.v3
-        
-        # Create multi-dataset meta-loaders
-        if use_v3:
-            # V3: Mask-based split (preserves shape) - only random sampling
-            print("Using MultiDatasetMetaTaskLoaderV3: mask-based split with random sampling")
-            print(f"  Support fraction: {meta_config['support_frac']}")
-            print(f"  Inner steps: {meta_config['inner_steps']}")
-            train_meta_loader = MultiDatasetMetaTaskLoaderV3(
-                data_loaders=train_loaders,
-                support_frac=meta_config["support_frac"],
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-            val_meta_loader = MultiDatasetMetaTaskLoaderV3(
-                data_loaders=valid_loaders,
-                support_frac=meta_config["support_frac"],
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-        elif args.round_robin:
-            # V1: Round-robin uses time-based splitting within batches
-            print("Using RoundRobinMetaTaskLoader (V1): one task from each dataset per epoch")
-            train_meta_loader = RoundRobinMetaTaskLoader(
-                data_loaders=train_loaders,
-                support_frac=meta_config["support_frac"],
-            )
-            
-            val_meta_loader = RoundRobinMetaTaskLoader(
-                data_loaders=valid_loaders,
-                support_frac=meta_config["support_frac"],
-            )
-        else:
-            # V2: Each inner step uses a DIFFERENT full batch
-            query_batches = meta_config.get("query_batches", 16)
-            inner_epochs = meta_config.get("inner_epochs", 1)
-            print("Using MultiDatasetMetaTaskLoaderV2: random task sampling with full batches")
-            print(f"  Each task uses {meta_config['inner_steps'] + query_batches} batches "
-                  f"({meta_config['inner_steps']} support + {query_batches} query)")
-            print(f"  Inner loop: {meta_config['inner_steps']} batches × {inner_epochs} epochs = "
-                  f"{meta_config['inner_steps'] * inner_epochs} training steps")
-            train_meta_loader = MultiDatasetMetaTaskLoaderV2(
-                data_loaders=train_loaders,
-                inner_steps=meta_config["inner_steps"],
-                query_batches=query_batches,
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-            
-            val_meta_loader = MultiDatasetMetaTaskLoaderV2(
-                data_loaders=valid_loaders,
-                inner_steps=meta_config["inner_steps"],
-                query_batches=query_batches,
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-            use_v2 = True
+        print("Using mask-based support/query split")
+        print(f"  Support fraction: {meta_config['support_frac']}")
+        print(f"  Inner steps: {meta_config['inner_steps']}")
+        train_meta_loader = MultiDatasetMetaTaskLoader(
+            data_loaders=train_loaders,
+            support_frac=meta_config["support_frac"],
+            tasks_per_batch=meta_config["tasks_per_batch"],
+        )
+        val_meta_loader = MultiDatasetMetaTaskLoader(
+            data_loaders=valid_loaders,
+            support_frac=meta_config["support_frac"],
+            tasks_per_batch=meta_config["tasks_per_batch"],
+        )
     else:
         # Single dataset mode
         train_loader, valid_loader, data_target_dim = get_data_loaders(
@@ -433,47 +370,19 @@ def main():
         
         print(f"Data loaded. Target dim from data: {data_target_dim}")
 
-        use_v2 = False
-        use_v3 = args.v3
-        
-        if use_v3:
-            # V3: Mask-based split for single dataset
-            print("Using MultiDatasetMetaTaskLoaderV3 for single dataset: mask-based split")
-            print(f"  Support fraction: {meta_config['support_frac']}")
-            print(f"  Inner steps: {meta_config['inner_steps']}")
-            train_meta_loader = MultiDatasetMetaTaskLoaderV3(
-                data_loaders={train_datasets[0]: train_loader},
-                support_frac=meta_config["support_frac"],
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-            val_meta_loader = MultiDatasetMetaTaskLoaderV3(
-                data_loaders={train_datasets[0]: valid_loader},
-                support_frac=meta_config["support_frac"],
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-        else:
-            # V2: Each inner step uses a different full batch
-            query_batches = meta_config.get("query_batches", 16)
-            inner_epochs = meta_config.get("inner_epochs", 1)
-            print("Using MultiDatasetMetaTaskLoaderV2 for single dataset: full batches")
-            print(f"  Each task uses {meta_config['inner_steps'] + query_batches} batches "
-                  f"({meta_config['inner_steps']} support + {query_batches} query)")
-            print(f"  Inner loop: {meta_config['inner_steps']} batches × {inner_epochs} epochs = "
-                  f"{meta_config['inner_steps'] * inner_epochs} training steps")
-            train_meta_loader = MultiDatasetMetaTaskLoaderV2(
-                data_loaders={train_datasets[0]: train_loader},
-                inner_steps=meta_config["inner_steps"],
-                query_batches=query_batches,
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-            
-            val_meta_loader = MultiDatasetMetaTaskLoaderV2(
-                data_loaders={train_datasets[0]: valid_loader},
-                inner_steps=meta_config["inner_steps"],
-                query_batches=query_batches,
-                tasks_per_batch=meta_config["tasks_per_batch"],
-            )
-            use_v2 = True
+        print("Using mask-based support/query split")
+        print(f"  Support fraction: {meta_config['support_frac']}")
+        print(f"  Inner steps: {meta_config['inner_steps']}")
+        train_meta_loader = MultiDatasetMetaTaskLoader(
+            data_loaders={train_datasets[0]: train_loader},
+            support_frac=meta_config["support_frac"],
+            tasks_per_batch=meta_config["tasks_per_batch"],
+        )
+        val_meta_loader = MultiDatasetMetaTaskLoader(
+            data_loaders={train_datasets[0]: valid_loader},
+            support_frac=meta_config["support_frac"],
+            tasks_per_batch=meta_config["tasks_per_batch"],
+        )
 
     # Prepare save folder
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -481,11 +390,10 @@ def main():
         foldername = args.save_folder
     elif multi_dataset_mode:
         datasets_str = "-".join(sorted(train_datasets))
-        task_type = "roundrobin" if args.round_robin else "random"
         if args.held_out:
-            foldername = f"./save/meta/multi_excl_{args.held_out}_{task_type}/MUSTANG-{current_time}/"
+            foldername = f"./save/meta/multi_excl_{args.held_out}_masksplit/MUSTANG-{current_time}/"
         else:
-            foldername = f"./save/meta/multi_{datasets_str}_{task_type}/MUSTANG-{current_time}/"
+            foldername = f"./save/meta/multi_{datasets_str}_masksplit/MUSTANG-{current_time}/"
     else:
         foldername = f"./save/meta/{train_datasets[0]}/MUSTANG-{current_time}/"
     os.makedirs(foldername, exist_ok=True)
@@ -498,10 +406,8 @@ def main():
         "train_datasets": train_datasets,
         "multi_dataset_mode": multi_dataset_mode,
         "held_out": args.held_out,
-        "round_robin": args.round_robin,
-        "use_v2": use_v2,
-        "use_v3": use_v3,
-        "graph_model": graph_model,
+        "task_split": "mask_based",
+        "use_graph": use_graph,
         "adj_path": args.adj_path,
     }
     with open(os.path.join(foldername, "config.json"), "w") as f:
@@ -527,8 +433,8 @@ def main():
                 "batch_size": config["train"]["batch_size"],
                 "lr": config["train"]["lr"],
                 "meta_config": meta_config,
-                "version": "v3" if use_v3 else ("v2" if use_v2 else "v1"),
-                "model_variant": "graph-aware conditional diffusion" if graph_model else "conditional diffusion",
+                "meta_strategy": "mask_based",
+                "model_variant": "graph-aware conditional diffusion" if use_graph else "conditional diffusion",
                 "adj_path": adj_path,
                 "args": vars(args),
             },
@@ -544,17 +450,11 @@ def main():
             wandb_kwargs["mode"] = args.wandb_mode
         wandb_run = wandb.init(**wandb_kwargs)
 
-    # Determine version label
-    if use_v3:
-        version_label = "V3 (mask-based split)"
-    elif use_v2:
-        version_label = "V2 (full batches)"
-    else:
-        version_label = "V1 (time-split)"
+    strategy_label = "Mask-based support/query split"
 
     print(f"\n=== Starting MUSTANG Training ===")
     print(f"Output folder: {foldername}")
-    print(f"Using {version_label} MUSTANG")
+    print(f"Strategy: {strategy_label}")
     
     # Meta-training with periodic validation and early stopping
     val_interval = meta_config.get("val_interval", 20)
@@ -562,87 +462,33 @@ def main():
     val_tasks = meta_config.get("val_tasks", 10)
     best_model_path = os.path.join(foldername, "best_meta_model.pth")
     
-    # Run meta-training (First-Order MAML)
-    if use_v3:
-        # V3: Mask-based split (preserves shape) with early stopping
-        meta_losses = meta_train_v3(
-            model=model,
-            meta_loader=train_meta_loader,
-            optimizer=optimizer,
-            inner_steps=meta_config["inner_steps"],
-            inner_lr=meta_config["inner_lr"],
-            num_outer_steps=meta_config["num_outer_steps"],
-            grad_clip=meta_config["grad_clip"],
-            scheduler=None,
-            log_interval=meta_config["log_interval"],
-            wandb_run=wandb_run,
-            # Early stopping parameters
-            val_loader=val_meta_loader,
-            val_interval=val_interval,
-            patience=patience,
-            save_path=best_model_path,
-        )
-    elif use_v2:
-        # V2: Each inner step uses a different batch
-        meta_losses = meta_train_v2(
-            model=model,
-            meta_loader=train_meta_loader,
-            optimizer=optimizer,
-            inner_lr=meta_config["inner_lr"],
-            inner_epochs=meta_config.get("inner_epochs", 1),
-            num_outer_steps=meta_config["num_outer_steps"],
-            grad_clip=meta_config["grad_clip"],
-            scheduler=None,
-            log_interval=meta_config["log_interval"],
-            wandb_run=wandb_run,
-            val_loader=val_meta_loader,
-            val_interval=val_interval,
-            num_val_tasks=val_tasks,
-        )
-    else:
-        # V1: Same batch for all inner steps (with time-split)
-        meta_losses = meta_train(
-            model=model,
-            meta_loader=train_meta_loader,
-            optimizer=optimizer,
-            inner_steps=meta_config["inner_steps"],
-            inner_lr=meta_config["inner_lr"],
-            num_outer_steps=meta_config["num_outer_steps"],
-            grad_clip=meta_config["grad_clip"],
-            scheduler=None,
-            log_interval=meta_config["log_interval"],
-            wandb_run=wandb_run,
-            val_loader=val_meta_loader,
-            val_interval=val_interval,
-            num_val_tasks=val_tasks,
-        )
+    meta_losses = meta_train(
+        model=model,
+        meta_loader=train_meta_loader,
+        optimizer=optimizer,
+        inner_steps=meta_config["inner_steps"],
+        inner_lr=meta_config["inner_lr"],
+        num_outer_steps=meta_config["num_outer_steps"],
+        grad_clip=meta_config["grad_clip"],
+        scheduler=None,
+        log_interval=meta_config["log_interval"],
+        wandb_run=wandb_run,
+        val_loader=val_meta_loader,
+        val_interval=val_interval,
+        patience=patience,
+        save_path=best_model_path,
+        num_val_tasks=val_tasks,
+    )
     
     # Final validation
     print("\n=== Final Validation ===")
-    if use_v3:
-        val_loss = meta_validate_v3(
-            model=model,
-            meta_loader=val_meta_loader,
-            inner_steps=meta_config["inner_steps"],
-            inner_lr=meta_config["inner_lr"],
-            num_val_tasks=20,
-        )
-    elif use_v2:
-        val_loss = meta_validate_v2(
-            model=model,
-            meta_loader=val_meta_loader,
-            inner_lr=meta_config["inner_lr"],
-            inner_epochs=meta_config.get("inner_epochs", 1),
-            num_val_tasks=20,
-        )
-    else:
-        val_loss = meta_validate(
-            model=model,
-            meta_loader=val_meta_loader,
-            inner_steps=meta_config["inner_steps"],
-            inner_lr=meta_config["inner_lr"],
-            num_val_tasks=20,
-        )
+    val_loss = meta_validate(
+        model=model,
+        meta_loader=val_meta_loader,
+        inner_steps=meta_config["inner_steps"],
+        inner_lr=meta_config["inner_lr"],
+        num_val_tasks=20,
+    )
     print(f"Final validation loss: {val_loss:.4f}")
 
     # Save final model
@@ -674,8 +520,8 @@ def main():
     print(f"Training datasets: {train_datasets}")
     if args.held_out:
         print(f"Held-out dataset: {args.held_out}")
-    print(f"Task sampling: {'Round-Robin' if args.round_robin else 'Random'}")
-    print(f"Meta-learning version: {version_label}")
+    print("Task sampling: Random")
+    print(f"Meta-learning strategy: {strategy_label}")
     print(f"Meta-trained model saved to {foldername}")
     print(f"Final training loss: {meta_losses[-1]:.4f}")
     print(f"Final validation loss: {val_loss:.4f}")

@@ -30,10 +30,10 @@ diffusion:
   proj_t: 16
   is_cross_t: true
   is_cross_s: true
-  # graph-aware conditional diffusion 超参数
-  graph_max_hops: 2        # 图最短路径最大跳数，用于 attention bias
-  graph_dropout: 0.1       # graph-aware conditional diffusion 中的 dropout 率
-  graph_ff_dim: 64         # graph-aware conditional diffusion feed-forward 层维度
+
+  graph_max_hops: 2
+  graph_dropout: 0.1
+  graph_ff_dim: 64
 
 model:
   is_unconditional: 0

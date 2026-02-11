@@ -32,25 +32,6 @@ def Conv1d_with_init(in_channels, out_channels, kernel_size):
     return layer
 
 
-def asym_adj(adj):
-    adj = np.asarray(adj, dtype=np.float32)
-    rowsum = adj.sum(axis=1)
-    d_inv = np.zeros_like(rowsum, dtype=np.float32)
-    nonzero = rowsum != 0
-    d_inv[nonzero] = 1.0 / rowsum[nonzero]
-    return (adj.T * d_inv).T
-
-
-def compute_support_gwn(adj):
-    if isinstance(adj, torch.Tensor):
-        adj = adj.detach().cpu().numpy()
-    adj = np.asarray(adj, dtype=np.float32)
-    return [
-        torch.tensor(asym_adj(adj), dtype=torch.float32),
-        torch.tensor(asym_adj(adj.T), dtype=torch.float32),
-    ]
-
-
 def _shortest_path_hops(adj):
     if isinstance(adj, torch.Tensor):
         adj = adj.detach().cpu().numpy()
@@ -102,108 +83,7 @@ class DiffusionEmbedding(nn.Module):
         return table
 
 
-class DiffusionGraphConv(nn.Module):
-    def __init__(self, in_channels, out_channels, diffusion_steps=2, bias=True):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.diffusion_steps = diffusion_steps
-        self.mlp = nn.Conv2d(
-            in_channels * (diffusion_steps * 2 + 1),
-            out_channels,
-            kernel_size=(1, 1),
-            bias=bias,
-        )
-
-    def forward(self, x, base_shape, supports):
-        B, C, _ = x.shape
-        K, L = base_shape[2], base_shape[3]
-        x = x.view(B, C, K, L)
-
-        out = [x]
-
-        for support in supports:
-            x1 = x
-            for _ in range(1, self.diffusion_steps + 1):
-                x1 = torch.einsum("ij,bcjl->bcil", support, x1)
-                out.append(x1)
-
-        x_cat = torch.cat(out, dim=1)
-        x_out = self.mlp(x_cat)
-        x_out = x_out.view(B, self.out_channels, K * L)
-        return x_out
-
-
-def _resolve_graph_lags(config):
-    if config is None:
-        return [0]
-    lags = config.get("graph_lags")
-    if lags is None:
-        max_lag = config.get("graph_max_lag")
-        if max_lag is None:
-            return [0]
-        try:
-            max_lag = int(max_lag)
-        except (TypeError, ValueError):
-            return [0]
-        if max_lag <= 0:
-            return [0]
-        return list(range(max_lag + 1))
-    if isinstance(lags, int):
-        if lags <= 0:
-            return [0]
-        return list(range(lags + 1))
-    if isinstance(lags, (list, tuple)):
-        cleaned = []
-        for lag in lags:
-            try:
-                cleaned.append(int(lag))
-            except (TypeError, ValueError):
-                continue
-        cleaned = sorted({lag for lag in cleaned if lag >= 0})
-        return cleaned or [0]
-    return [0]
-
-
-class LaggedDiffusionGraphConv(nn.Module):
-    def __init__(self, in_channels, out_channels, diffusion_steps=2, lags=None, learnable=True):
-        super().__init__()
-        self.lags = lags if lags is not None else [0]
-        self.graph_conv = DiffusionGraphConv(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            diffusion_steps=diffusion_steps,
-        )
-        self.learnable = learnable and len(self.lags) > 1
-        if self.learnable:
-            self.lag_logits = nn.Parameter(torch.zeros(len(self.lags)))
-        else:
-            self.register_buffer("lag_logits", torch.zeros(len(self.lags)))
-
-    def _shift_time(self, x, base_shape, lag):
-        if lag == 0:
-            return x
-        B, C, K, L = base_shape
-        x = x.view(B, C, K, L)
-        if lag >= L:
-            return torch.zeros_like(x).view(B, C, K * L)
-        out = torch.zeros_like(x)
-        out[..., lag:] = x[..., : L - lag]
-        return out.view(B, C, K * L)
-
-    def forward(self, x, base_shape, supports):
-        if len(self.lags) == 1 and self.lags[0] == 0:
-            return self.graph_conv(x, base_shape, supports)
-        outputs = []
-        for lag in self.lags:
-            x_lag = self._shift_time(x, base_shape, lag)
-            outputs.append(self.graph_conv(x_lag, base_shape, supports))
-        stacked = torch.stack(outputs, dim=0)
-        weights = torch.softmax(self.lag_logits, dim=0).view(-1, 1, 1, 1)
-        return (weights * stacked).sum(dim=0)
-
-
-class GraphormerSpatialAttention(nn.Module):
+class GraphAwareSpatialAttention(nn.Module):
     """
     Graph-aware conditional diffusion style spatial attention with per-head bias.
     
@@ -272,31 +152,12 @@ class GraphormerSpatialAttention(nn.Module):
         return x
 
 
-class GraphDiffusionSpatialLayer(nn.Module):
-    def __init__(self, channels, diffusion_steps, supports):
-        super().__init__()
-        if supports is None or len(supports) < 2:
-            raise ValueError("GraphDiffusionSpatialLayer requires graph supports.")
-        self.graph_conv = DiffusionGraphConv(
-            in_channels=channels,
-            out_channels=channels,
-            diffusion_steps=diffusion_steps,
-        )
-        self.register_buffer("support_0", supports[0])
-        self.register_buffer("support_1", supports[1])
-
-    def forward(self, x, base_shape):
-        supports = [self.support_0, self.support_1]
-        return self.graph_conv(x, base_shape, supports)
-
-
 class DiffGraphAwareConditionalDiffusion(nn.Module):
     def __init__(self, config, inputdim=2, adj=None):
         super().__init__()
         if adj is None:
             raise ValueError("DiffGraphAwareConditionalDiffusion requires an adjacency matrix.")
         self.channels = config["channels"]
-        self.graph_model = config.get("graph_model", "graphormer")
         self.diffusion_embedding = DiffusionEmbedding(
             num_steps=config["num_steps"],
             embedding_dim=config["diffusion_embedding_dim"],
@@ -307,16 +168,9 @@ class DiffGraphAwareConditionalDiffusion(nn.Module):
         self.output_projection2 = Conv1d_with_init(self.channels, 1, 1)
         nn.init.zeros_(self.output_projection2.weight)
 
-        supports = None
         graph_max_hops = config.get("graph_max_hops", 6)
         graph_dropout = config.get("graph_dropout", 0.1)
         graph_ff_dim = config.get("graph_ff_dim", 64)
-        graph_diffusion_steps = config.get("graph_diffusion_steps", 2)
-
-        if self.graph_model == "graphdiffusion":
-            supports = compute_support_gwn(adj)
-        elif self.graph_model != "graphormer":
-            raise ValueError(f"Unknown graph_model: {self.graph_model}")
 
         self.residual_layers = nn.ModuleList(
             [
@@ -326,13 +180,10 @@ class DiffGraphAwareConditionalDiffusion(nn.Module):
                     diffusion_embedding_dim=config["diffusion_embedding_dim"],
                     nheads=config["nheads"],
                     is_linear=config.get("is_linear", False),
-                    graph_model=self.graph_model,
                     adj=adj,
-                    supports=supports,
                     graph_max_hops=graph_max_hops,
                     graph_dropout=graph_dropout,
                     graph_ff_dim=graph_ff_dim,
-                    graph_diffusion_steps=graph_diffusion_steps,
                 )
                 for _ in range(config["layers"])
             ]
@@ -370,13 +221,10 @@ class ResidualBlock(nn.Module):
         diffusion_embedding_dim,
         nheads,
         adj,
-        supports=None,
         graph_max_hops=6,
         graph_dropout=0.1,
         graph_ff_dim=64,
-        graph_diffusion_steps=2,
         is_linear=False,
-        graph_model="graphormer",
     ):
         super().__init__()
         self.diffusion_projection = nn.Linear(diffusion_embedding_dim, channels)
@@ -389,24 +237,14 @@ class ResidualBlock(nn.Module):
             self.time_layer = get_linear_trans(heads=nheads, layers=1, channels=channels)
         else:
             self.time_layer = get_torch_trans(heads=nheads, layers=1, channels=channels)
-        self.graph_model = graph_model
-        if self.graph_model == "graphormer":
-            self.graph_layer = GraphormerSpatialAttention(
-                channels=channels,
-                nheads=nheads,
-                adj=adj,
-                max_hops=graph_max_hops,
-                dropout=graph_dropout,
-                dim_feedforward=graph_ff_dim,
-            )
-        elif self.graph_model == "graphdiffusion":
-            self.graph_layer = GraphDiffusionSpatialLayer(
-                channels=channels,
-                diffusion_steps=graph_diffusion_steps,
-                supports=supports,
-            )
-        else:
-            raise ValueError(f"Unknown graph_model: {self.graph_model}")
+        self.graph_layer = GraphAwareSpatialAttention(
+            channels=channels,
+            nheads=nheads,
+            adj=adj,
+            max_hops=graph_max_hops,
+            dropout=graph_dropout,
+            dim_feedforward=graph_ff_dim,
+        )
 
     def forward_time(self, y, base_shape):
         B, channel, K, L = base_shape
@@ -434,12 +272,8 @@ class ResidualBlock(nn.Module):
         diffusion_emb = self.diffusion_projection(diffusion_emb).unsqueeze(-1)
         y = x + diffusion_emb
 
-        if self.graph_model == "graphdiffusion":
-            y = self.forward_feature(y, base_shape)
-            y = self.forward_time(y, base_shape)
-        else:
-            y = self.forward_time(y, base_shape)
-            y = self.forward_feature(y, base_shape)
+        y = self.forward_time(y, base_shape)
+        y = self.forward_feature(y, base_shape)
 
         y = self.mid_projection(y)
 
